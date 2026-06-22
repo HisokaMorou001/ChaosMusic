@@ -4,6 +4,7 @@ import time
 import traceback
 import random
 from threading import Thread
+from html import unescape
 
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -11,23 +12,25 @@ from django.utils import timezone
 
 from slack_sdk import WebClient
 
-from .services import fetch_5_tracks
+from .services import fetch_5_tracks_ai
 from .models import Poll, Track, Vote
 
 
+# Inizializzazione del client Slack
 client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
-# poll_id -> tracks fissi
+# Cache globali in memoria per gestire lo stato dei thread e dei dati stabili
 POLL_TRACK_CACHE = {}
-
-# poll_id -> leaderboard message ts (NON channel)
 LEADERBOARD_MESSAGE_CACHE = {}
+POLL_UPDATER_RUNNING = {}
+LAST_GENERATED_TRACKS = []
 
 
 # -----------------------------
 # MODAL (solo input)
 # -----------------------------
 def build_modal(tracks, poll_id):
+    """Costruisce la finestra modale per la votazione delle tracce."""
     return {
         "type": "modal",
         "callback_id": "vote_modal",
@@ -44,8 +47,8 @@ def build_modal(tracks, poll_id):
                     "action_id": "track",
                     "options": [
                         {
-                            "text": {"type": "plain_text", "text": t["title"][:75]},
-                            "value": t["video_id"]
+                            "text": {"type": "plain_text", "text": unescape(t.title[:75])},
+                            "value": str(t.id) 
                         }
                         for t in tracks
                     ]
@@ -59,31 +62,23 @@ def build_modal(tracks, poll_id):
 # LEADERBOARD
 # -----------------------------
 def get_leaderboard(poll):
+    """Recupera l'elenco delle tracce ordinate per numero di voti."""
     votes = Vote.objects.filter(poll=poll)
 
     counts = {}
     for v in votes:
         counts[v.track_id] = counts.get(v.track_id, 0) + 1
 
-    tracks = Track.objects.filter(id__in=counts.keys())
-
+    track_ids = POLL_TRACK_CACHE.get(poll.id, [])
     leaderboard = []
-    for t in tracks:
-        leaderboard.append({
-            "id": t.id,
-            "title": t.title,
-            "votes": counts.get(t.id, 0)
-        })
-
-    # include anche canzoni senza voti
-    all_tracks = POLL_TRACK_CACHE.get(poll.id, [])
-    for t in all_tracks:
-        track_obj = Track.objects.filter(youtube_video_id=t["video_id"]).first()
-        if track_obj and track_obj.id not in counts:
+    
+    for track_id in track_ids:
+        track_obj = Track.objects.filter(id=track_id).first()
+        if track_obj:
             leaderboard.append({
                 "id": track_obj.id,
-                "title": track_obj.title,
-                "votes": 0
+                "title": unescape(track_obj.title),
+                "votes": counts.get(track_id, 0)
             })
 
     leaderboard.sort(key=lambda x: x["votes"], reverse=True)
@@ -91,32 +86,34 @@ def get_leaderboard(poll):
 
 
 def build_leaderboard_text(poll):
+    """Genera il layout testuale grafico della classifica."""
     leaderboard = get_leaderboard(poll)
 
     if not leaderboard:
-        return "📊 Nessun voto ancora"
+        return ":bar_chart: Nessun voto ancora"
 
-    max_votes = max(x["votes"] for x in leaderboard)
-
-    lines = ["📊 *Leaderboard live*\n"]
-
+    max_votes = max(x["votes"] for x in leaderboard) if leaderboard else 1
     total = sum(x["votes"] for x in leaderboard)
 
+    lines = [":trophy: *LEADERBOARD LIVE*\n"]
+
     for i, item in enumerate(leaderboard, start=1):
-        bar_len = int((item["votes"] / max_votes) * 10) if max_votes else 0
-        bar = "█" * bar_len
+        percentage = int((item["votes"] / total) * 100) if total > 0 else 0
+        bar_len = int((item["votes"] / max_votes) * 20) if max_votes > 0 else 0
+        bar = "█" * bar_len + "░" * (20 - bar_len)
+        votes_text = f"{item['votes']} voto" if item['votes'] == 1 else f"{item['votes']} voti"
 
-        lines.append(
-            f"{i}. *{item['title']}*\n"
-            f"{bar} {item['votes']} voti"
-        )
+        lines.append(f"{i}) {unescape(item['title'])}")
+        lines.append(f"{bar} {votes_text} ({percentage}%)")
 
-    lines.append(f"\n👥 Totale voti: {total}")
+    lines.append("\n━━━━━━━━━━━━━━━━━━")
+    lines.append(f"\n:busts_in_silhouette: Totale voti: {total}")
 
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 
 def update_leaderboard(poll):
+    """Esegue l'aggiornamento parziale del solo messaggio di classifica."""
     ts = LEADERBOARD_MESSAGE_CACHE.get(poll.id)
     if not ts:
         return
@@ -132,13 +129,13 @@ def update_leaderboard(poll):
 # WINNER
 # -----------------------------
 def compute_winner(poll):
+    """Calcola il vincitore gestendo eventuali pareggi in modo casuale."""
     votes = Vote.objects.filter(poll=poll)
 
     if not votes.exists():
         return None
 
     counts = {}
-
     for v in votes:
         counts[v.track_id] = counts.get(v.track_id, 0) + 1
 
@@ -146,14 +143,37 @@ def compute_winner(poll):
     top = [tid for tid, c in counts.items() if c == max_votes]
 
     winner_id = random.choice(top)
-
     return Track.objects.get(id=winner_id)
 
 
 # -----------------------------
-# TIMER
+# THREADS TIMERS
 # -----------------------------
+def leaderboard_updater(poll_id):
+    """Thread: Aggiorna la classifica visiva su Slack ogni 5 secondi."""
+    try:
+        while POLL_UPDATER_RUNNING.get(poll_id, False):
+            time.sleep(5)
+            
+            if not POLL_UPDATER_RUNNING.get(poll_id, False):
+                break
+
+            try:
+                poll = Poll.objects.get(id=poll_id)
+                if poll.is_open:
+                    update_leaderboard(poll)
+            except Poll.DoesNotExist:
+                break
+            except Exception:
+                pass
+    except Exception:
+        traceback.print_exc()
+    finally:
+        POLL_UPDATER_RUNNING.pop(poll_id, None)
+
+
 def poll_timer(poll_id):
+    """Thread: Gestisce lo scadere dei 5 minuti (300s) del sondaggio."""
     time.sleep(300)
 
     try:
@@ -162,24 +182,24 @@ def poll_timer(poll_id):
         if not poll.is_open:
             return
 
+        POLL_UPDATER_RUNNING[poll_id] = False
+        time.sleep(1) 
+
         poll.is_open = False
         poll.ended_at = timezone.now()
         poll.save()
 
         winner = compute_winner(poll)
-
         final_text = build_leaderboard_text(poll) + "\n\n"
 
         if winner:
             final_text += (
-                "🏆 *SONDAGGIO TERMINATO*\n"
-                f"*Vincitore: {winner.title}*\n"
+                ":trophy: *SONDAGGIO TERMINATO*\n"
+                f"Vincitore: {unescape(winner.title)}\n"
                 f"https://youtu.be/{winner.youtube_video_id}"
             )
         else:
-            final_text += "❌ Nessun voto ricevuto"
-
-        update_leaderboard(poll)
+            final_text += ":x: Nessun voto ricevuto"
 
         ts = LEADERBOARD_MESSAGE_CACHE.get(poll.id)
         if ts:
@@ -201,49 +221,60 @@ def poll_timer(poll_id):
         traceback.print_exc()
 
 
-# -----------------------------
-# START
-# -----------------------------
-@csrf_exempt
-def slack_start(request):
-    if request.method != "POST":
-        return HttpResponse(status=405)
-
-    trigger_id = request.POST.get("trigger_id")
-    channel_id = request.POST.get("channel_id")
-
-    if not trigger_id or not channel_id:
-        return HttpResponse("missing data", status=400)
-
+def background_poll_initializer(channel_id, poll_id):
+    """Thread principale: elabora la pulizia pesante del DB, chiama l'AI e invia i blocchi a Slack."""
+    global LAST_GENERATED_TRACKS
     try:
-        tracks = fetch_5_tracks("music")
+        # 1. Pulizia asincrona delle sessioni precedenti (spostata qui dal flusso principale)
+        open_polls = Poll.objects.filter(is_open=True).exclude(id=poll_id)
+        for p in open_polls:
+            p.is_open = False
+            p.save()
+            POLL_UPDATER_RUNNING[p.id] = False 
+        
+        from django.db.models import Count
+        Track.objects.annotate(vote_count=Count('votes')).filter(vote_count=0).delete()
+        Vote.objects.filter(poll__is_open=False).delete()
+        
+        # 2. Recupero e validazione tracce AI
+        tracks = fetch_5_tracks_ai()
+        
+        current_video_ids = {t['video_id'] for t in tracks}
+        if LAST_GENERATED_TRACKS and current_video_ids == set(LAST_GENERATED_TRACKS):
+            max_attempts = 3
+            for _ in range(max_attempts):
+                tracks = fetch_5_tracks_ai()
+                current_video_ids = {t['video_id'] for t in tracks}
+                if current_video_ids != set(LAST_GENERATED_TRACKS):
+                    break
+        
+        if isinstance(LAST_GENERATED_TRACKS, list):
+            LAST_GENERATED_TRACKS.clear()
+            LAST_GENERATED_TRACKS.extend([t['video_id'] for t in tracks])
 
-        poll = Poll.objects.create(
-            is_open=True,
-            channel_id=channel_id,
-            created_at=timezone.now()
-        )
+        # 3. Associazione e salvataggio delle tracce a DB
+        poll = Poll.objects.get(id=poll_id)
+        track_objs = []
+        for t in tracks:
+            track_obj = Track.objects.create(
+                youtube_video_id=t["video_id"],
+                title=t["title"],
+                thumbnail_url=t["thumbnail"]
+            )
+            track_objs.append(track_obj)
 
-        POLL_TRACK_CACHE[poll.id] = tracks
+        POLL_TRACK_CACHE[poll.id] = [t.id for t in track_objs]
 
-        # 1) leaderboard iniziale (MESSAGGIO FISSO)
-        msg = client.chat_postMessage(
-            channel=channel_id,
-            text=build_leaderboard_text(poll)
-        )
-
-        LEADERBOARD_MESSAGE_CACHE[poll.id] = msg["ts"]
-
-        # 2) messaggio voto (sempre sotto)
+        # 4. MESSAGGIO DI VOTO (SOPRA)
         client.chat_postMessage(
             channel=channel_id,
-            text="<!channel> 🎵 Sondaggio attivo (5 minuti)",
+            text="<!channel> :musical_note: Sondaggio attivo (5 minuti)",
             blocks=[
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "🎵 *Vota la tua canzone preferita*"
+                        "text": "<!channel> *Vota la tua canzone preferita* :musical_note:"
                     }
                 },
                 {
@@ -259,26 +290,72 @@ def slack_start(request):
                 }
             ]
         )
+        
+        # 5. MESSAGGIO LEADERBOARD INIZIALE (SOTTO)
+        msg = client.chat_postMessage(
+            channel=channel_id,
+            text=build_leaderboard_text(poll)
+        )
+        LEADERBOARD_MESSAGE_CACHE[poll.id] = msg["ts"]
 
+        # 6. Avvio dei timer asincroni separati
+        POLL_UPDATER_RUNNING[poll.id] = True
+        Thread(target=leaderboard_updater, args=(poll.id,)).start()
         Thread(target=poll_timer, args=(poll.id,)).start()
-
-        return JsonResponse({"ok": True})
 
     except Exception:
         traceback.print_exc()
-        return HttpResponse("error", status=500)
 
 
 # -----------------------------
-# INTERACTIONS
+# START (Comando Slack)
+# -----------------------------
+@csrf_exempt
+def slack_start(request):
+    """Endpoint attivato dal comando Slash di Slack per iniziare il gioco."""
+    if request.method != "POST":
+        return HttpResponse(status=405)
+
+    trigger_id = request.POST.get("trigger_id")
+    channel_id = request.POST.get("channel_id")
+
+    if not trigger_id or not channel_id:
+        return HttpResponse("Missing data (trigger_id/channel_id)", status=400)
+
+    try:
+        # Creazione record a DB istantanea per generare il poll.id
+        poll = Poll.objects.create(
+            is_open=True,
+            channel_id=channel_id,
+            created_at=timezone.now()
+        )
+
+        # Avvio del thread in background a cui viene delegata tutta l'elaborazione pesante
+        Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
+
+        # Risposta immediata a Slack entro pochissimi millisecondi
+        return HttpResponse("")
+
+    except Exception:
+        traceback.print_exc()
+        return HttpResponse("Internal Server Error", status=500)
+
+
+# -----------------------------
+# INTERACTIONS (Pulsanti e Modal)
 # -----------------------------
 @csrf_exempt
 def slack_interactions(request):
+    """Endpoint unico per gestire i clic sui pulsanti e l'invio del modal."""
+    if request.method != "POST":
+        return HttpResponse(status=405)
+
     try:
         payload = json.loads(request.POST.get("payload", "{}"))
+        payload_type = payload.get("type")
 
-        # OPEN MODAL
-        if payload.get("type") == "block_actions":
+        # EVENTO A: Clic sul pulsante "Vota" -> Apertura Modal
+        if payload_type == "block_actions":
             action = payload["actions"][0]
 
             if action["action_id"] == "open_vote":
@@ -288,17 +365,17 @@ def slack_interactions(request):
                 if not poll.is_open:
                     return JsonResponse({"text": "Sondaggio chiuso"})
 
-                tracks = POLL_TRACK_CACHE.get(poll_id)
+                track_ids = POLL_TRACK_CACHE.get(poll_id, [])
+                tracks = Track.objects.filter(id__in=track_ids).order_by("id")
 
                 client.views_open(
                     trigger_id=payload["trigger_id"],
                     view=build_modal(tracks, poll.id)
                 )
+                return HttpResponse("")
 
-                return JsonResponse({"ok": True})
-
-        # VOTE
-        if payload.get("type") == "view_submission":
+        # EVENTO B: Invio del Form dal Modal -> Registrazione Voto
+        if payload_type == "view_submission":
             user_id = payload["user"]["id"]
             poll_id = int(payload["view"]["private_metadata"])
             poll = Poll.objects.get(id=poll_id)
@@ -306,31 +383,45 @@ def slack_interactions(request):
             if not poll.is_open:
                 return JsonResponse({"response_action": "clear"})
 
+            # Verifica unicità del voto
             if Vote.objects.filter(poll=poll, slack_user_id=user_id).exists():
                 return JsonResponse({
                     "response_action": "errors",
-                    "errors": {"track_block": "Hai già votato"}
+                    "errors": {"track_block": "Hai già votato in questo sondaggio."}
                 })
 
-            value = payload["view"]["state"]["values"]["track_block"]["track"]["selected_option"]["value"]
+            selected_values = payload["view"]["state"]["values"]["track_block"]["track"]["selected_option"]
+            if not selected_values:
+                return JsonResponse({
+                    "response_action": "errors",
+                    "errors": {"track_block": "Seleziona un'opzione prima di inviare."}
+                })
+                
+            track_db_id = int(selected_values["value"])
 
-            track, _ = Track.objects.get_or_create(
-                youtube_video_id=value,
-                defaults={"title": "", "thumbnail_url": ""}
-            )
+            try:
+                track = Track.objects.get(id=track_db_id)
+            except Track.DoesNotExist:
+                return JsonResponse({
+                    "response_action": "errors",
+                    "errors": {"track_block": "Traccia non trovata a database."}
+                })
 
+            # Salvataggio effettivo
             Vote.objects.create(
                 poll=poll,
                 track=track,
                 slack_user_id=user_id
             )
 
+            # Aggiornamento grafico della classifica in tempo reale
             update_leaderboard(poll)
 
+            # Svuota e chiude il modal correttamente su Slack
             return JsonResponse({"response_action": "clear"})
 
-        return JsonResponse({"ok": True})
+        return HttpResponse("")
 
     except Exception:
         traceback.print_exc()
-        return HttpResponse("error", status=500)
+        return HttpResponse("Internal Error", status=500)
