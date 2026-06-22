@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
 
-from .models import Poll, Vote
+from .models import Poll, Vote, Track
 
 try:
     from openai import OpenAI
@@ -325,10 +325,14 @@ def close_poll_and_compute_winner(poll_id):
 
         winner_id = random.choice(top_tracks)
 
-        poll.winner_id = winner_id
-        poll.save()
+        from django.utils import timezone
+        poll.ended_at = timezone.now()
+        poll.save(update_fields=["is_open", "ended_at"]) if hasattr(poll, 'ended_at') else poll.save()
 
-        return poll.winner
+        try:
+            return Track.objects.get(id=winner_id)
+        except Track.DoesNotExist:
+            return None
     except Exception:
         traceback.print_exc()
-        return None 
+        return None

@@ -119,3 +119,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Secret token per endpoint cron sicuro (impostare CRON_SECRET nell'env)
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+# Optional alternate channel (public) to post cron polls to, e.g. #general
+CRON_SLACK_ALT_CHANNEL = os.getenv("CRON_SLACK_ALT_CHANNEL", "")
+# Slack channel da usare per i cron-triggered poll (impostare CRON_SLACK_CHANNEL nell'env)
+CRON_SLACK_CHANNEL = os.getenv("CRON_SLACK_CHANNEL", "")

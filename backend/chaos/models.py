@@ -1,6 +1,5 @@
 from django.db import models
 
-
 class Track(models.Model):
     youtube_video_id = models.CharField(max_length=255, unique=True)
     title = models.CharField(max_length=255)
@@ -32,6 +31,8 @@ class Poll(models.Model):
         null=True,
         blank=True
     )
+
+    kiosk_played = models.BooleanField(default = False)
 
     def __str__(self):
         status = "open" if self.is_open else "closed"
