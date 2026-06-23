@@ -344,6 +344,7 @@ def slack_start(request):
 
         # Avvio del thread in background a cui viene delegata tutta l'elaborazione pesante
         logger.info("[poll=%s] avvio background_poll_initializer thread", poll.id)
+        print(f"[poll={poll.id}] avvio background_poll_initializer thread")
         Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
 
         # Risposta immediata a Slack entro pochissimi millisecondi
@@ -363,6 +364,7 @@ def start_new_poll(channel_id):
     )
 
     logger.info("[poll=%s] start_new_poll: avvio background_poll_initializer thread", poll.id)
+    print(f"[poll={poll.id}] start_new_poll: avvio background_poll_initializer thread")
     Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
     return poll
 
