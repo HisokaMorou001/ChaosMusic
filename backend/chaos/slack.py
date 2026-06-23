@@ -312,8 +312,10 @@ def background_poll_initializer(channel_id, poll_id):
         Thread(target=leaderboard_updater, args=(poll.id,)).start()
         # Avvia la catena di timer: 11 thread da 300s che poi lanciano
         # il `poll_timer` (ultimo thread che esegue l'ultimo sleep e finalizza).
-        from .threads import start_poll_timer_chain
-        start_poll_timer_chain(poll.id, poll_timer, steps=11, step_seconds=300)
+        from . import threads
+        logger.info("[poll=%s] starting sequential 11-step timer chain via step1", poll.id)
+        print(f"[poll={poll.id}] starting sequential 11-step timer chain via step1")
+        Thread(target=threads.step1, args=(poll.id,)).start()
 
     except Exception:
         traceback.print_exc()

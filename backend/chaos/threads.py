@@ -3,46 +3,119 @@ import traceback
 import logging
 from threading import Thread
 
-# Ensure at least a basic logging configuration so INFO messages reach stdout
+# Minimal file containing only the 11 sequential step functions requested.
+# Each step sleeps `SLEEP_SECONDS`, prints a debug message, and starts the next
+# step in a new thread. The 11th step launches `slack.poll_timer(poll_id)`.
+
+# Basic logging so messages appear in stdout
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
+SLEEP_SECONDS = 300
 
-def start_poll_timer_chain(poll_id, final_callable, steps=11, step_seconds=300):
-    """Avvia una catena di `steps` thread; ciascuno dorme `step_seconds` e
-    avvia il successivo. Il thread numero `steps` avvia `final_callable`
-    (che di solito è `poll_timer` in `slack.py`) in un nuovo thread.
+def step1(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step1 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step1 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step2, args=(poll_id,))
+    t.daemon = True
+    t.start()
 
-    Questo realizza 11 * 300s + last poll_timer(300s) = 3600s totali.
-    """
-    def worker(idx):
-        try:
-            logger.info("[poll=%s] thread %d/%d started, sleeping %ds", poll_id, idx, steps, step_seconds)
-            print(f"[poll={poll_id}] thread {idx}/{steps} started, sleeping {step_seconds}s")
-            time.sleep(step_seconds)
-            if idx < steps:
-                t = Thread(target=worker, args=(idx + 1,))
-                t.daemon = True
-                logger.info("[poll=%s] starting thread %d/%d", poll_id, idx + 1, steps)
-                print(f"[poll={poll_id}] starting thread {idx+1}/{steps}")
-                t.start()
-            else:
-                # Avvia il 12esimo thread (final_callable) che gestirà l'ultimo
-                # sleep e la finalizzazione del sondaggio.
-                t_final = Thread(target=final_callable, args=(poll_id,))
-                t_final.daemon = True
-                logger.info("[poll=%s] starting final poll_timer thread", poll_id)
-                print(f"[poll={poll_id}] starting final poll_timer thread")
-                t_final.start()
-        except Exception:
-            traceback.print_exc()
 
-    # start first thread
-    logger.info("[poll=%s] starting initial timer thread 1/%d", poll_id, steps)
-    print(f"[poll={poll_id}] starting initial timer thread 1/{steps}")
-    t0 = Thread(target=worker, args=(1,))
-    t0.daemon = True
-    t0.start()
-    return
+def step2(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step2 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step2 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step3, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step3(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step3 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step3 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step4, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step4(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step4 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step4 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step5, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step5(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step5 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step5 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step6, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step6(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step6 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step6 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step7, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step7(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step7 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step7 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step8, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step8(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step8 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step8 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step9, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step9(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step9 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step9 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step10, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step10(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step10 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step10 finished sleep {SLEEP_SECONDS}s")
+    t = Thread(target=step11, args=(poll_id,))
+    t.daemon = True
+    t.start()
+
+
+def step11(poll_id):
+    time.sleep(SLEEP_SECONDS)
+    logger.info("[poll=%s] step11 finished sleep %ds", poll_id, SLEEP_SECONDS)
+    print(f"[poll={poll_id}] step11 finished sleep {SLEEP_SECONDS}s")
+    # Collegamento al 12esimo: funzione `poll_timer` in slack.py
+    try:
+        from . import slack as slack_module
+        t = Thread(target=slack_module.poll_timer, args=(poll_id,))
+        t.daemon = True
+        logger.info("[poll=%s] launching slack.poll_timer (12th)", poll_id)
+        print(f"[poll={poll_id}] launching slack.poll_timer (12th)")
+        t.start()
+    except Exception:
+        traceback.print_exc()
