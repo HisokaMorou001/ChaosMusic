@@ -9,16 +9,11 @@ from html import unescape
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
-from django.conf import settings
 
 from slack_sdk import WebClient
 
 from .services import fetch_5_tracks_ai
 from .models import Poll, Track, Vote
-
-import logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 # Inizializzazione del client Slack
@@ -109,7 +104,7 @@ def build_leaderboard_text(poll):
         votes_text = f"{item['votes']} voto" if item['votes'] == 1 else f"{item['votes']} voti"
 
         lines.append(f"{i}) {unescape(item['title'])}")
-        lines.append(f"{bar} {votes_text} ({percentage}%)\n")
+        lines.append(f"{bar} {votes_text} ({percentage}%)")
 
     lines.append("\n━━━━━━━━━━━━━━━━━━")
     lines.append(f"\n:busts_in_silhouette: Totale voti: {total}")
@@ -151,58 +146,6 @@ def compute_winner(poll):
     return Track.objects.get(id=winner_id)
 
 
-def send_weekly_recap(channel_id, count=3):
-    """Collect the winners of the most recent `count` finished polls and post a recap."""
-    try:
-        polls = Poll.objects.filter(is_open=False, ended_at__isnull=False).order_by("-ended_at")[:count]
-        if not polls:
-            client.chat_postMessage(channel=channel_id, text="Nessun sondaggio recente da riepilogare.")
-            return
-
-        lines = [":trophy: Weekly Recap — vincitori degli ultimi sondaggi :trophy:\n"]
-        for i, p in enumerate(polls, start=1):
-            try:
-                winner = compute_winner(p)
-                title = unescape(winner.title) if winner else "(nessun voto)"
-                vid = winner.youtube_video_id if winner else None
-                if vid:
-                    lines.append(f"{i}) {title} — https://youtu.be/{vid}")
-                else:
-                    lines.append(f"{i}) {title}")
-            except Exception:
-                lines.append(f"{i}) Errore nel calcolare il vincitore")
-
-        text = "\n".join(lines)
-        client.chat_postMessage(channel=channel_id, text=text)
-
-        # also post to alternate channel if configured
-        try:
-            alt = getattr(settings, "CRON_SLACK_ALT_CHANNEL", "")
-            if alt:
-                client.chat_postMessage(channel=alt, text=text)
-        except Exception:
-            logger.exception("failed to post weekly recap to alt channel")
-
-    except Exception:
-        logger.exception("send_weekly_recap failed")
-
-    # Reset votes and reopen polls for the next week
-    try:
-        from .models import Vote
-        for p in polls:
-            try:
-                Vote.objects.filter(poll=p).delete()
-                p.is_open = True
-                p.ended_at = None
-                p.leaderboard_ts = None
-                p.kiosk_played = False
-                p.save()
-            except Exception:
-                logger.exception("failed to reset poll %s", getattr(p, 'id', 'unknown'))
-    except Exception:
-        logger.exception("failed to clear votes after recap")
-
-
 # -----------------------------
 # THREADS TIMERS
 # -----------------------------
@@ -229,30 +172,23 @@ def leaderboard_updater(poll_id):
         POLL_UPDATER_RUNNING.pop(poll_id, None)
 
 
-def finalize_poll(poll_id):
-    """Finalize a poll: close, compute winner, and announce it on Slack.
+def poll_timer(poll_id):
+    """Thread: Gestisce lo scadere dei 5 minuti (300s) del sondaggio."""
+    time.sleep(3600)  # Changed from 30 minutes to 60 minutes
 
-    This is factored out so we can call it both from the timer and manually
-    during tests.
-    """
     try:
         poll = Poll.objects.get(id=poll_id)
 
         if not poll.is_open:
-            logger.info("finalize_poll: poll %s already closed", poll_id)
             return
 
-        # stop leaderboard updates
         POLL_UPDATER_RUNNING[poll_id] = False
-        time.sleep(1)
+        time.sleep(1) 
 
         poll.is_open = False
         poll.ended_at = timezone.now()
         poll.save()
 
-        # compute winner
-        votes = Vote.objects.filter(poll=poll)
-        logger.info("finalize_poll: poll=%s channel=%s votes=%s", poll.id, poll.channel_id, votes.count())
         winner = compute_winner(poll)
         final_text = build_leaderboard_text(poll) + "\n\n"
 
@@ -262,51 +198,33 @@ def finalize_poll(poll_id):
                 f"Vincitore: {unescape(winner.title)}\n"
                 f"https://youtu.be/{winner.youtube_video_id}"
             )
-            logger.info("finalize_poll: winner for poll %s is track %s", poll.id, getattr(winner, 'id', None))
         else:
             final_text += ":x: Nessun voto ricevuto"
-            logger.info("finalize_poll: no winner for poll %s (no votes)", poll.id)
 
         ts = LEADERBOARD_MESSAGE_CACHE.get(poll.id)
-        # Try update first, fall back to postMessage on failure
         if ts:
-            try:
-                resp = client.chat_update(channel=poll.channel_id, ts=ts, text=final_text)
-                logger.info("finalize_poll: chat_update response=%s", resp)
-            except Exception as e:
-                logger.exception("finalize_poll: chat_update failed, falling back to postMessage")
-                try:
-                    resp = client.chat_postMessage(channel=poll.channel_id, text=final_text)
-                    logger.info("finalize_poll: fallback postMessage response=%s", resp)
-                except Exception:
-                    logger.exception("finalize_poll: fallback postMessage also failed")
+            client.chat_update(
+                channel=poll.channel_id,
+                ts=ts,
+                text=final_text
+            )
         else:
-            try:
-                resp = client.chat_postMessage(channel=poll.channel_id, text=final_text)
-                logger.info("finalize_poll: postMessage response=%s", resp)
-            except Exception:
-                logger.exception("finalize_poll: postMessage failed")
+            client.chat_postMessage(
+                channel=poll.channel_id,
+                text=final_text
+            )
 
         POLL_TRACK_CACHE.pop(poll.id, None)
         LEADERBOARD_MESSAGE_CACHE.pop(poll.id, None)
 
-    except Poll.DoesNotExist:
-        logger.warning("finalize_poll: poll %s does not exist", poll_id)
     except Exception:
-        logger.exception("finalize_poll: unexpected error")
-
-
-def poll_timer(poll_id):
-    """Thread wrapper: sleep then finalize (30 minutes)."""
-    time.sleep(1800)
-    finalize_poll(poll_id)
+        traceback.print_exc()
 
 
 def background_poll_initializer(channel_id, poll_id):
     """Thread principale: elabora la pulizia pesante del DB, chiama l'AI e invia i blocchi a Slack."""
     global LAST_GENERATED_TRACKS
     try:
-        logger.info("background_poll_initializer starting poll_id=%s channel=%s", poll_id, channel_id)
         # 1. Pulizia asincrona delle sessioni precedenti (spostata qui dal flusso principale)
         open_polls = Poll.objects.filter(is_open=True).exclude(id=poll_id)
         for p in open_polls:
@@ -348,78 +266,42 @@ def background_poll_initializer(channel_id, poll_id):
         POLL_TRACK_CACHE[poll.id] = [t.id for t in track_objs]
 
         # 4. MESSAGGIO DI VOTO (SOPRA)
-        try:
-            resp = client.chat_postMessage(
-                channel=channel_id,
-                text="<!channel> :musical_note: Sondaggio attivo (30 minuti)",
-                blocks=[
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "<!channel> *Vota la tua canzone preferita* :musical_note:"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Vota"},
-                                "action_id": "open_vote",
-                                "value": str(poll.id)
-                            }
-                        ]
+        client.chat_postMessage(
+            channel=channel_id,
+            text="<!channel> :musical_note: Sondaggio attivo (5 minuti)",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "<!channel> *Vota la tua canzone preferita* :musical_note:"
                     }
-                ]
-            )
-            logger.info("chat_postMessage response: %s", resp)
-
-            # Also post to alternate public channel if configured (helps visibility)
-            try:
-                alt = getattr(settings, "CRON_SLACK_ALT_CHANNEL", "")
-                if alt:
-                    alt_resp = client.chat_postMessage(
-                        channel=alt,
-                        text="Sondaggio attivo (30 minuti)",
-                        blocks=[
-                            {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": "*Vota la tua canzone preferita* :musical_note:"
-                                }
-                            },
-                            {
-                                "type": "actions",
-                                "elements": [
-                                    {
-                                        "type": "button",
-                                        "text": {"type": "plain_text", "text": "Vota"},
-                                        "action_id": "open_vote",
-                                        "value": str(poll.id)
-                                    }
-                                ]
-                            }
-                        ]
-                    )
-                    logger.info("chat_postMessage alt response: %s", alt_resp)
-            except Exception:
-                logger.exception("chat_postMessage to alt channel failed")
-
-        except Exception:
-            logger.exception("chat_postMessage failed")
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Vota"},
+                            "action_id": "open_vote",
+                            "value": str(poll.id)
+                        }
+                    ]
+                }
+            ]
+        )
         
         # 5. MESSAGGIO LEADERBOARD INIZIALE (SOTTO)
+        msg = client.chat_postMessage(
+            channel=channel_id,
+            text=build_leaderboard_text(poll)
+        )
+        LEADERBOARD_MESSAGE_CACHE[poll.id] = msg["ts"]
         try:
-            msg = client.chat_postMessage(
-                channel=channel_id,
-                text=build_leaderboard_text(poll)
-            )
-            LEADERBOARD_MESSAGE_CACHE[poll.id] = msg["ts"]
-            logger.info("leaderboard message sent, ts=%s", msg.get("ts"))
+            poll.leaderboard_ts = msg.get("ts")
+            poll.save(update_fields=["leaderboard_ts"])
         except Exception:
-            logger.exception("leaderboard chat_postMessage failed")
+            pass
 
         # 6. Avvio dei timer asincroni separati
         POLL_UPDATER_RUNNING[poll.id] = True
@@ -436,22 +318,6 @@ def background_poll_initializer(channel_id, poll_id):
 @csrf_exempt
 def slack_start(request):
     """Endpoint attivato dal comando Slash di Slack per iniziare il gioco."""
-    # Support both: POST from Slack slash command, and GET from cron (secure)
-    if request.method == "GET":
-        token = request.GET.get("token")
-        if not token or token != getattr(settings, "CRON_SECRET", ""):
-            return HttpResponse("Forbidden", status=403)
-
-        channel = getattr(settings, "CRON_SLACK_CHANNEL", "")
-        if not channel:
-            return HttpResponse("Server misconfigured: CRON_SLACK_CHANNEL not set", status=500)
-
-        try:
-            start_new_poll(channel)
-            return HttpResponse("Sondaggio avviato via Cron", status=200)
-        except Exception as e:
-            return HttpResponse(f"Errore: {e}", status=500)
-
     if request.method != "POST":
         return HttpResponse(status=405)
 
@@ -481,11 +347,7 @@ def slack_start(request):
 
 
 def start_new_poll(channel_id):
-    """Programmatic entry point to start a poll (used by cron endpoint).
-
-    Creates the Poll record and launches the background initializer thread,
-    mirroring the behaviour of the `/start` Slack command.
-    """
+    """Avvia un nuovo sondaggio programmaticamente (usato da cron)."""
     poll = Poll.objects.create(
         is_open=True,
         channel_id=channel_id,
@@ -493,7 +355,43 @@ def start_new_poll(channel_id):
     )
 
     Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
-    return poll.id
+    return poll
+
+
+def send_weekly_recap(channel_id, count=3):
+    """Compone e invia il recap settimanale dei `count` ultimi sondaggi chiusi
+    che non siano già stati inclusi in un recap precedente, poi marca quei
+    sondaggi come "recapped" in modo che i prossimi 3 prenderanno il loro posto.
+    """
+    # Seleziona gli ultimi `count` sondaggi chiusi non ancora ricapitolati
+    polls = Poll.objects.filter(is_open=False, ended_at__isnull=False, recapped=False).order_by("-ended_at")[:count]
+
+    if not polls:
+        client.chat_postMessage(channel=channel_id, text=":calendar: Nessun sondaggio chiuso da includere nel recap settimanale.")
+        return
+
+    lines = [":trophy: *RECAP SETTIMANALE - TOP %d*\n" % len(polls)]
+
+    for i, poll in enumerate(polls, start=1):
+        try:
+            winner = compute_winner(poll)
+        except Exception:
+            winner = None
+
+        if winner:
+            lines.append(f"{i}) *{unescape(winner.title)}* — https://youtu.be/{winner.youtube_video_id}")
+        else:
+            lines.append(f"{i}) Nessun voto ricevuto")
+
+    message = "\n".join(lines)
+
+    # Invia il messaggio di recap
+    client.chat_postMessage(channel=channel_id, text=message)
+
+    # Marca i sondaggi come recapped così non verranno inclusi nel prossimo recap
+    for p in polls:
+        p.recapped = True
+        p.save(update_fields=["recapped"]) 
 
 
 # -----------------------------
@@ -522,9 +420,6 @@ def slack_interactions(request):
 
                 track_ids = POLL_TRACK_CACHE.get(poll_id, [])
                 tracks = Track.objects.filter(id__in=track_ids).order_by("id")
-
-                if not tracks.exists():
-                    return JsonResponse({"text": "Nessun brano disponibile per questo sondaggio."})
 
                 client.views_open(
                     trigger_id=payload["trigger_id"],

@@ -26,6 +26,9 @@ class Poll(models.Model):
         blank=True
     )
 
+    # Flag per indicare che il sondaggio è stato già incluso nel recap settimanale
+    recapped = models.BooleanField(default=False)
+
     # Data di chiusura del sondaggio
     ended_at = models.DateTimeField(
         null=True,
