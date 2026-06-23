@@ -233,19 +233,31 @@ def poll_timer(poll_id):
     """Thread: Gestisce lo scadere del sondaggio dopo 60 minuti (3600s)."""
     time.sleep(3600)
 
+
+def finalize_poll(poll_id):
+    """Finalize a poll: close, compute winner, and announce it on Slack.
+
+    This is factored out so we can call it both from the timer and manually
+    during tests.
+    """
     try:
         poll = Poll.objects.get(id=poll_id)
 
         if not poll.is_open:
+            logger.info("finalize_poll: poll %s already closed", poll_id)
             return
 
+        # stop leaderboard updates
         POLL_UPDATER_RUNNING[poll_id] = False
-        time.sleep(1) 
+        time.sleep(1)
 
         poll.is_open = False
         poll.ended_at = timezone.now()
         poll.save()
 
+        # compute winner
+        votes = Vote.objects.filter(poll=poll)
+        logger.info("finalize_poll: poll=%s channel=%s votes=%s", poll.id, poll.channel_id, votes.count())
         winner = compute_winner(poll)
         final_text = build_leaderboard_text(poll) + "\n\n"
 
@@ -255,27 +267,44 @@ def poll_timer(poll_id):
                 f"Vincitore: {unescape(winner.title)}\n"
                 f"https://youtu.be/{winner.youtube_video_id}"
             )
+            logger.info("finalize_poll: winner for poll %s is track %s", poll.id, getattr(winner, 'id', None))
         else:
             final_text += ":x: Nessun voto ricevuto"
+            logger.info("finalize_poll: no winner for poll %s (no votes)", poll.id)
 
         ts = LEADERBOARD_MESSAGE_CACHE.get(poll.id)
+        # Try update first, fall back to postMessage on failure
         if ts:
-            client.chat_update(
-                channel=poll.channel_id,
-                ts=ts,
-                text=final_text
-            )
+            try:
+                resp = client.chat_update(channel=poll.channel_id, ts=ts, text=final_text)
+                logger.info("finalize_poll: chat_update response=%s", resp)
+            except Exception as e:
+                logger.exception("finalize_poll: chat_update failed, falling back to postMessage")
+                try:
+                    resp = client.chat_postMessage(channel=poll.channel_id, text=final_text)
+                    logger.info("finalize_poll: fallback postMessage response=%s", resp)
+                except Exception:
+                    logger.exception("finalize_poll: fallback postMessage also failed")
         else:
-            client.chat_postMessage(
-                channel=poll.channel_id,
-                text=final_text
-            )
+            try:
+                resp = client.chat_postMessage(channel=poll.channel_id, text=final_text)
+                logger.info("finalize_poll: postMessage response=%s", resp)
+            except Exception:
+                logger.exception("finalize_poll: postMessage failed")
 
         POLL_TRACK_CACHE.pop(poll.id, None)
         LEADERBOARD_MESSAGE_CACHE.pop(poll.id, None)
 
+    except Poll.DoesNotExist:
+        logger.warning("finalize_poll: poll %s does not exist", poll_id)
     except Exception:
-        traceback.print_exc()
+        logger.exception("finalize_poll: unexpected error")
+
+
+def poll_timer(poll_id):
+    """Thread wrapper: sleep then finalize."""
+    time.sleep(3600)
+    finalize_poll(poll_id)
 
 
 def background_poll_initializer(channel_id, poll_id):

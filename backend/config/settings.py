@@ -26,7 +26,19 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",")
+_env_allowed = [h for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h]
+# Ensure the Render domain is allowed for deployment
+if "chaosmusic.onrender.com" not in _env_allowed:
+    _env_allowed.append("chaosmusic.onrender.com")
+if not _env_allowed:
+    _env_allowed = ["localhost", "127.0.0.1", "chaosmusic.onrender.com"]
+ALLOWED_HOSTS = _env_allowed
+
+# When behind a proxy (Render, etc.), trust X-Forwarded-Proto for secure redirects
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Trust the Render origin for CSRF if not explicitly set
+CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "https://chaosmusic.onrender.com").split(",")
 
 # Application definition
 
