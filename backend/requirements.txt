@@ -8,3 +8,5 @@ psycopg2-binary
 django-cors-headers
 openai
 isodate
+gunicorn
+whitenoise
