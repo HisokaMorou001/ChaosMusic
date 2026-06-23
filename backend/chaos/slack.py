@@ -297,8 +297,8 @@ def finalize_poll(poll_id):
 
 
 def poll_timer(poll_id):
-    """Thread wrapper: sleep then finalize (test: 10s)."""
-    time.sleep(10)
+    """Thread wrapper: sleep then finalize (30 minutes)."""
+    time.sleep(1800)
     finalize_poll(poll_id)
 
 
@@ -351,7 +351,7 @@ def background_poll_initializer(channel_id, poll_id):
         try:
             resp = client.chat_postMessage(
                 channel=channel_id,
-                text="<!channel> :musical_note: Sondaggio attivo (60 minuti)",
+                text="<!channel> :musical_note: Sondaggio attivo (30 minuti)",
                 blocks=[
                     {
                         "type": "section",
@@ -381,7 +381,7 @@ def background_poll_initializer(channel_id, poll_id):
                 if alt:
                     alt_resp = client.chat_postMessage(
                         channel=alt,
-                        text="Sondaggio attivo (60 minuti)",
+                        text="Sondaggio attivo (30 minuti)",
                         blocks=[
                             {
                                 "type": "section",
