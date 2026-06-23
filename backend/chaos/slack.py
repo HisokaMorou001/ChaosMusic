@@ -5,6 +5,7 @@ import traceback
 import random
 from threading import Thread
 from html import unescape
+import logging
 
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -14,6 +15,7 @@ from slack_sdk import WebClient
 
 from .services import fetch_5_tracks_ai
 from .models import Poll, Track, Vote
+logger = logging.getLogger(__name__)
 
 
 # Inizializzazione del client Slack
@@ -173,8 +175,10 @@ def leaderboard_updater(poll_id):
 
 
 def poll_timer(poll_id):
-    """Thread: Gestisce lo scadere dei 5 minuti (300s) del sondaggio."""
-    time.sleep(3600)  # Changed from 30 minutes to 60 minutes
+    """Thread: Terminazione sondaggio eseguita dall'ultimo thread della catena.
+    Il singolo `poll_timer` ora dorme 300s (ultimo step) e poi finalizza il sondaggio.
+    """
+    time.sleep(300)
 
     try:
         poll = Poll.objects.get(id=poll_id)
@@ -306,7 +310,10 @@ def background_poll_initializer(channel_id, poll_id):
         # 6. Avvio dei timer asincroni separati
         POLL_UPDATER_RUNNING[poll.id] = True
         Thread(target=leaderboard_updater, args=(poll.id,)).start()
-        Thread(target=poll_timer, args=(poll.id,)).start()
+        # Avvia la catena di timer: 11 thread da 300s che poi lanciano
+        # il `poll_timer` (ultimo thread che esegue l'ultimo sleep e finalizza).
+        from .threads import start_poll_timer_chain
+        start_poll_timer_chain(poll.id, poll_timer, steps=11, step_seconds=300)
 
     except Exception:
         traceback.print_exc()
@@ -336,6 +343,7 @@ def slack_start(request):
         )
 
         # Avvio del thread in background a cui viene delegata tutta l'elaborazione pesante
+        logger.info("[poll=%s] avvio background_poll_initializer thread", poll.id)
         Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
 
         # Risposta immediata a Slack entro pochissimi millisecondi
@@ -354,6 +362,7 @@ def start_new_poll(channel_id):
         created_at=timezone.now()
     )
 
+    logger.info("[poll=%s] start_new_poll: avvio background_poll_initializer thread", poll.id)
     Thread(target=background_poll_initializer, args=(channel_id, poll.id)).start()
     return poll
 
