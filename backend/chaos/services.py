@@ -14,11 +14,16 @@ try:
 except ImportError:
     OpenAI = None
 
-# Inizializzazione client YouTube v3
-youtube = build(
-    "youtube", "v3",
-    developerKey=os.getenv("YOUTUBE_API_KEY")
-)
+# Inizializzazione client YouTube v3 (protetta: non fallire all'import se mancano credenziali)
+youtube = None
+try:
+    youtube = build(
+        "youtube", "v3",
+        developerKey=os.getenv("YOUTUBE_API_KEY")
+    )
+except Exception as e:
+    print(f"WARNING: YouTube client init failed at import time: {e}")
+    youtube = None
 
 
 # -----------------------------

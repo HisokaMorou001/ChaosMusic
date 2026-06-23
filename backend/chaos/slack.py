@@ -229,11 +229,6 @@ def leaderboard_updater(poll_id):
         POLL_UPDATER_RUNNING.pop(poll_id, None)
 
 
-def poll_timer(poll_id):
-    """Thread: Gestisce lo scadere del sondaggio dopo 60 minuti (3600s)."""
-    time.sleep(3600)
-
-
 def finalize_poll(poll_id):
     """Finalize a poll: close, compute winner, and announce it on Slack.
 
@@ -302,8 +297,8 @@ def finalize_poll(poll_id):
 
 
 def poll_timer(poll_id):
-    """Thread wrapper: sleep then finalize."""
-    time.sleep(3600)
+    """Thread wrapper: sleep then finalize (test: 10s)."""
+    time.sleep(10)
     finalize_poll(poll_id)
 
 
